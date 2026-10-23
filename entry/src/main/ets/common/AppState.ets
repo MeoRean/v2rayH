@@ -215,6 +215,7 @@ export class AppState {
     this.geoipSize = this.store.sizeOf('geo/geoip.dat');
     this.geositeAt = this.store.mtimeOf('geo/geosite.dat');
     this.geoipAt = this.store.mtimeOf('geo/geoip.dat');
+    this.refreshGeoSupport();
   }
 
   // ---------- diagnostics ----------
@@ -575,11 +576,12 @@ export class AppState {
     return r;
   }
 
-  private geoCodeSupported(fileName: string, code: string): boolean {
-    let data = this.store.readBytes('geo/' + fileName);
-    if (data === undefined) {
-      return false;
-    }
+  // Category availability is cached: scanning the multi-megabyte geo files on
+  // every connect froze the UI for a noticeable moment. Refresh only at app
+  // start and whenever the geo files change.
+  private geoSupport: Map<string, boolean> = new Map();
+
+  private geoBytesContain(data: Uint8Array, code: string): boolean {
     let probe = new Uint8Array(buffer.from(code, 'utf-8').buffer);
     if (probe.length === 0 || data.length < probe.length) {
       return false;
@@ -601,6 +603,27 @@ export class AppState {
       }
     }
     return false;
+  }
+
+  private refreshGeoSupport(): void {
+    this.geoSupport.clear();
+    let site = this.store.readBytes('geo/geosite.dat');
+    let ip = this.store.readBytes('geo/geoip.dat');
+    let siteCats: string[] = ['private', 'cn', 'category-ads-all'];
+    for (let i = 0; i < siteCats.length; i++) {
+      this.geoSupport.set('geosite.dat:' + siteCats[i],
+        site !== undefined && this.geoBytesContain(site, siteCats[i]));
+    }
+    let ipCats: string[] = ['private', 'cn'];
+    for (let i = 0; i < ipCats.length; i++) {
+      this.geoSupport.set('geoip.dat:' + ipCats[i],
+        ip !== undefined && this.geoBytesContain(ip, ipCats[i]));
+    }
+  }
+
+  private geoCodeSupported(fileName: string, code: string): boolean {
+    let v = this.geoSupport.get(fileName + ':' + code);
+    return v === true;
   }
 
   private async startVpnWithRetry(times: number): Promise<boolean> {
