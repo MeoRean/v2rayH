@@ -1,6 +1,8 @@
 import { SubGroup } from './SubGroup';
 
 export class RoutingOptions {
+  bypassLan: boolean = true;
+  bypassLanDomains: boolean = true;
   bypassCn: boolean = true;
   blockAds: boolean = true;
   directDomains: string[] = [];

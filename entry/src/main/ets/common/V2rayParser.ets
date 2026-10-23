@@ -93,6 +93,8 @@ function parseVless(link: string): ServerConfig | undefined {
   s.sid = getParam(parts[1], 'sid');
   let spx = getParam(parts[1], 'spx');
   s.spx = spx.length > 0 ? spx : '/';
+  let allowInsecure = getParam(parts[1], 'allowInsecure');
+  s.allowInsecure = allowInsecure === '1' || allowInsecure.toLowerCase() === 'true';
   s.network = getParam(parts[1], 'type');
   if (s.network.length === 0) { s.network = 'tcp'; }
   s.headerType = getParam(parts[1], 'headerType');
@@ -121,6 +123,7 @@ function parseVmess(link: string): ServerConfig | undefined {
   s.path = v.path ? v.path : '';
   s.sni = v.sni ? v.sni : '';
   s.fp = v.fp ? v.fp : '';
+  s.scy = v.scy ? v.scy : 'auto';
   s.security = (v.tls && v.tls.length > 0) ? 'tls' : 'none';
   return s;
 }
@@ -146,6 +149,8 @@ function parseTrojan(link: string): ServerConfig | undefined {
   if (s.network.length === 0) { s.network = 'tcp'; }
   s.path = getParam(parts[1], 'path');
   s.host = getParam(parts[1], 'host');
+  let allowInsecure = getParam(parts[1], 'allowInsecure');
+  s.allowInsecure = allowInsecure === '1' || allowInsecure.toLowerCase() === 'true';
   return s;
 }
 

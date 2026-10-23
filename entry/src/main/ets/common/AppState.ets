@@ -5,6 +5,7 @@ import { fileIo as fs, picker } from '@kit.CoreFileKit';
 import { buffer } from '@kit.ArkTS';
 import testNapi from 'libentry.so';
 import { ServerConfig } from '../model/ServerConfig';
+import { normalizeServer } from '../model/ServerConfig';
 import { SubGroup } from '../model/SubGroup';
 import { RoutingOptions, GeoOptions, BackupPayload } from '../model/ProxyOptions';
 import { parseSubscription } from './V2rayParser';
@@ -12,9 +13,10 @@ import { buildXrayConfig, buildTestConfig } from './XrayConf';
 import { AppStore } from './AppStore';
 import { SubscriptionFetcher } from './SubscriptionFetcher';
 import { AppTheme } from './AppTheme';
+import { selfBundleName } from './SelfBundle';
 
-const VPN_WANT: Want = {
-  bundleName: 'com.xii.v2rayh',
+export const VPN_WANT: Want = {
+  bundleName: selfBundleName(),
   abilityName: 'MyVpnExtAbility'
 };
 
@@ -67,6 +69,8 @@ export class AppState {
   ipBusy: boolean = false;
   ipError: string = '';
 
+  routeBypassLan: boolean = true;
+  routeBypassLanDomains: boolean = true;
   routeBypassCn: boolean = true;
   routeBlockAds: boolean = true;
   routeStrategy: string = 'IPIfNonMatch';
@@ -213,7 +217,40 @@ export class AppState {
     this.geoipAt = this.store.mtimeOf('geo/geoip.dat');
   }
 
+  // ---------- diagnostics ----------
+
+  readLogTail(name: string, maxBytes: number): string {
+    let text = this.store.readText(name);
+    if (text.length <= maxBytes) {
+      return text;
+    }
+    let cut = text.substring(text.length - maxBytes);
+    let nl = cut.indexOf('\n');
+    return nl >= 0 && nl < cut.length - 1 ? cut.substring(nl + 1) : cut;
+  }
+
+  clearLogs(): void {
+    let okVpn = this.store.writeText('vpn.log', '');
+    let okXray = this.store.writeText('xray_error.log', '');
+    // Both loggers write in append mode, so truncation is safe even while
+    // the kernel is running and holds an open fd.
+    this.status = okVpn && okXray ? '日志已清空' : '部分日志清空失败';
+  }
+
   // ---------- groups ----------
+
+  private normalizeGroupNodes(list: SubGroup[]): SubGroup[] {
+    for (let i = 0; i < list.length; i++) {
+      let g = list[i];
+      let nodes: ServerConfig[] = g.nodes !== undefined ? g.nodes : [];
+      let fixed: ServerConfig[] = [];
+      for (let j = 0; j < nodes.length; j++) {
+        fixed.push(normalizeServer(nodes[j]));
+      }
+      g.nodes = fixed;
+    }
+    return list;
+  }
 
   private loadGroups(): void {
     let text = this.store.readText(F_SUBS);
@@ -237,7 +274,7 @@ export class AppState {
         this.store.writeText(F_SUBS, JSON.stringify(loaded));
       }
     }
-    this.groups = loaded;
+    this.groups = this.normalizeGroupNodes(loaded);
     let idx = this.store.readText(F_ACTIVE_GROUP);
     let active = idx.length > 0 ? parseInt(idx, 10) : 0;
     if (isNaN(active) || active < 0 || active >= loaded.length) {
@@ -375,6 +412,94 @@ export class AppState {
     }
   }
 
+  // ---------- node editing ----------
+
+  editingIdx: number = -1;
+
+  startEdit(idx: number): void {
+    if (idx < 0 || idx >= this.servers.length) {
+      return;
+    }
+    this.editingIdx = idx;
+    AppStorage.setOrCreate('openEditorTick', Date.now());
+  }
+
+  cancelEdit(): void {
+    this.editingIdx = -1;
+  }
+
+  updateServer(idx: number, s: ServerConfig): void {
+    if (idx < 0 || idx >= this.servers.length) {
+      return;
+    }
+    let g = this.groups[this.activeGroup];
+    let nodes: ServerConfig[] = g.nodes !== undefined ? g.nodes : [];
+    let nextNodes: ServerConfig[] = [];
+    for (let i = 0; i < nodes.length; i++) {
+      nextNodes.push(i === idx ? s : nodes[i]);
+    }
+    let copy = new SubGroup(g.id, g.name, g.url);
+    copy.nodes = nextNodes;
+    copy.updatedAt = g.updatedAt;
+    let next: SubGroup[] = [];
+    for (let i = 0; i < this.groups.length; i++) {
+      next.push(i === this.activeGroup ? copy : this.groups[i]);
+    }
+    this.groups = next;
+    this.servers = nextNodes;
+    this.saveGroups();
+    this.editingIdx = -1;
+    this.status = '节点已更新';
+    if (idx === this.selected && this.connected) {
+      this.switchNode();
+    }
+  }
+
+  removeServer(idx: number): void {
+    if (idx < 0 || idx >= this.servers.length) {
+      return;
+    }
+    let g = this.groups[this.activeGroup];
+    let nodes: ServerConfig[] = g.nodes !== undefined ? g.nodes : [];
+    let nextNodes: ServerConfig[] = [];
+    for (let i = 0; i < nodes.length; i++) {
+      if (i !== idx) {
+        nextNodes.push(nodes[i]);
+      }
+    }
+    let copy = new SubGroup(g.id, g.name, g.url);
+    copy.nodes = nextNodes;
+    copy.updatedAt = g.updatedAt;
+    let next: SubGroup[] = [];
+    for (let i = 0; i < this.groups.length; i++) {
+      next.push(i === this.activeGroup ? copy : this.groups[i]);
+    }
+    this.groups = next;
+    this.servers = nextNodes;
+    this.saveGroups();
+
+    if (this.editingIdx === idx) {
+      this.editingIdx = -1;
+    } else if (this.editingIdx > idx) {
+      this.editingIdx = this.editingIdx - 1;
+    }
+
+    if (idx < this.selected) {
+      this.selected = this.selected - 1;
+    } else if (idx === this.selected) {
+      if (this.selected >= nextNodes.length) {
+        this.selected = nextNodes.length > 0 ? nextNodes.length - 1 : 0;
+      }
+      if (this.connected) {
+        // The node the tunnel was built on is gone: stop instead of silently
+        // rerouting traffic to whatever node now occupies the slot.
+        this.disconnect();
+      }
+    }
+    this.store.saveSelected(this.selected);
+    this.status = '已删除节点';
+  }
+
   addServers(list: ServerConfig[], groupName: string): number {
     if (list.length === 0) {
       return 0;
@@ -416,8 +541,66 @@ export class AppState {
       this.selected = 0;
     }
     let server = this.servers[this.selected];
-    let cfg = buildXrayConfig(server, XRAY_LOG_PATH, this.routingOptions());
+    let cfg = buildXrayConfig(server, XRAY_LOG_PATH, this.effectiveRoutingOptions());
     this.store.saveXrayConfig(cfg);
+  }
+
+  // Drop geo-based rules whose category is missing from the geo files
+  // actually on disk: a missing category makes Xray reject the whole config
+  // ("code not found in geosite.dat"). Only affects the generated config —
+  // the user's saved toggle states stay untouched.
+  private effectiveRoutingOptions(): RoutingOptions {
+    let r = this.routingOptions();
+    let dropped: string[] = [];
+    if (r.bypassLan && !this.geoCodeSupported('geoip.dat', 'private')) {
+      r.bypassLan = false;
+      dropped.push('geoip:private');
+    }
+    if (r.bypassLanDomains && !this.geoCodeSupported('geosite.dat', 'private')) {
+      r.bypassLanDomains = false;
+      dropped.push('geosite:private');
+    }
+    if (r.bypassCn
+      && !(this.geoCodeSupported('geosite.dat', 'cn') && this.geoCodeSupported('geoip.dat', 'cn'))) {
+      r.bypassCn = false;
+      dropped.push('geosite/geoip:cn');
+    }
+    if (r.blockAds && !this.geoCodeSupported('geosite.dat', 'category-ads-all')) {
+      r.blockAds = false;
+      dropped.push('geosite:category-ads-all');
+    }
+    if (dropped.length > 0) {
+      this.status = 'geo 文件缺少 ' + dropped.join('、') + '，已跳过对应规则；去「配置-资源文件」更新可恢复';
+    }
+    return r;
+  }
+
+  private geoCodeSupported(fileName: string, code: string): boolean {
+    let data = this.store.readBytes('geo/' + fileName);
+    if (data === undefined) {
+      return false;
+    }
+    let probe = new Uint8Array(buffer.from(code, 'utf-8').buffer);
+    if (probe.length === 0 || data.length < probe.length) {
+      return false;
+    }
+    let first = probe[0];
+    for (let i = 0; i <= data.length - probe.length; i++) {
+      if (data[i] !== first) {
+        continue;
+      }
+      let hit = true;
+      for (let j = 1; j < probe.length; j++) {
+        if (data[i + j] !== probe[j]) {
+          hit = false;
+          break;
+        }
+      }
+      if (hit) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private async startVpnWithRetry(times: number): Promise<boolean> {
@@ -536,6 +719,8 @@ export class AppState {
 
   private routingOptions(): RoutingOptions {
     let r = new RoutingOptions();
+    r.bypassLan = this.routeBypassLan;
+    r.bypassLanDomains = this.routeBypassLanDomains;
     r.bypassCn = this.routeBypassCn;
     r.blockAds = this.routeBlockAds;
     r.domainStrategy = this.routeStrategy;
@@ -633,6 +818,16 @@ export class AppState {
   private saveRouting(): void {
     let r = this.routingOptions();
     this.store.writeText(F_ROUTING, JSON.stringify(r));
+  }
+
+  setBypassLan(v: boolean): void {
+    this.routeBypassLan = v;
+    this.saveRouting();
+  }
+
+  setBypassLanDomains(v: boolean): void {
+    this.routeBypassLanDomains = v;
+    this.saveRouting();
   }
 
   setBypassCn(v: boolean): void {
@@ -796,6 +991,8 @@ export class AppState {
     if (rText.length > 0) {
       try {
         let r = JSON.parse(rText) as RoutingOptions;
+        this.routeBypassLan = r.bypassLan === undefined ? true : r.bypassLan;
+        this.routeBypassLanDomains = r.bypassLanDomains === undefined ? true : r.bypassLanDomains;
         this.routeBypassCn = r.bypassCn;
         this.routeBlockAds = r.blockAds;
         this.routeStrategy = r.domainStrategy;
@@ -950,7 +1147,7 @@ export class AppState {
   }
 
   private applyBackup(b: BackupPayload): void {
-    let groups: SubGroup[] = b.groups !== undefined ? b.groups : [];
+    let groups: SubGroup[] = this.normalizeGroupNodes(b.groups !== undefined ? b.groups : []);
     this.groups = groups;
     this.saveGroups();
     let active = b.activeGroup;
@@ -971,6 +1168,8 @@ export class AppState {
     this.store.saveSelected(this.selected);
     this.pings = [];
     if (b.routing !== undefined) {
+      this.routeBypassLan = b.routing.bypassLan === undefined ? true : b.routing.bypassLan;
+      this.routeBypassLanDomains = b.routing.bypassLanDomains === undefined ? true : b.routing.bypassLanDomains;
       this.routeBypassCn = b.routing.bypassCn;
       this.routeBlockAds = b.routing.blockAds;
       this.routeStrategy = b.routing.domainStrategy;

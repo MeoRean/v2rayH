@@ -166,6 +166,27 @@ export class AppStore {
     }
   }
 
+  readBytes(name: string): Uint8Array | undefined {
+    try {
+      let path = this.dir + '/' + name;
+      if (!fs.accessSync(path)) {
+        return undefined;
+      }
+      let stat = fs.statSync(path);
+      if (stat.size === 0) {
+        return undefined;
+      }
+      let f = fs.openSync(path, fs.OpenMode.READ_ONLY);
+      let buf = new ArrayBuffer(stat.size);
+      fs.readSync(f.fd, buf);
+      fs.closeSync(f);
+      return new Uint8Array(buf);
+    } catch (e) {
+      console.error('readBytes failed: ' + name + ' ' + JSON.stringify(e));
+      return undefined;
+    }
+  }
+
   writeText(name: string, text: string): boolean {
     try {
       let f = fs.openSync(this.dir + '/' + name, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);

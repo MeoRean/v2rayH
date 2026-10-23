@@ -3,8 +3,9 @@ import { Want } from '@kit.AbilityKit';
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { buffer } from '@kit.ArkTS';
 import testNapi from 'libentry.so';
+import { selfBundleName } from '../common/SelfBundle';
 
-const SELF_BUNDLE: string = 'com.xii.v2rayh';
+const SELF_BUNDLE: string = selfBundleName();
 
 export default class MyVpnExtAbility extends VpnExtensionAbility {
   private vpnConnection: vpnExtension.VpnConnection | undefined = undefined;

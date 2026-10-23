@@ -1,9 +1,15 @@
 import { AbilityConstant, ConfigurationConstant, UIAbility, Want, Configuration } from '@kit.AbilityKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
-import { BusinessError } from '@kit.BasicServicesKit';
-import { window } from '@kit.ArkUI';
+import { BusinessError, emitter } from '@kit.BasicServicesKit';
+import { window, display } from '@kit.ArkUI';
+import { image } from '@kit.ImageKit';
+import { statusBarManager } from '@kit.DeskTopExtensionKit';
+import { vpnExtension } from '@kit.NetworkKit';
+import { VPN_WANT } from '../common/AppState';
 
 const DOMAIN = 0x0000;
+const TRAY_MENU_SHOW: string = 'show';
+const TRAY_MENU_EXIT: string = 'exit';
 
 function syncAvoidArea(win: window.Window): void {
   try {
@@ -16,7 +22,21 @@ function syncAvoidArea(win: window.Window): void {
   }
 }
 
+function syncWindowWidth(win: window.Window): void {
+  try {
+    let px = win.getWindowProperties().windowRect.width;
+    let density = display.getDefaultDisplaySync().densityPixels;
+    let vp = density > 0 ? px / density : px;
+    AppStorage.setOrCreate('winWidthVp', vp);
+  } catch (err) {
+    hilog.error(DOMAIN, 'testTag', 'Failed to get window size. Cause: %{public}s', JSON.stringify(err));
+  }
+}
+
 export default class EntryAbility extends UIAbility {
+  private mainWindow: window.Window | undefined = undefined;
+  private trayReady: boolean = false;
+
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onCreate');
     AppStorage.setOrCreate('systemDarkFlag',
@@ -30,6 +50,141 @@ export default class EntryAbility extends UIAbility {
 
   onDestroy(): void {
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onDestroy');
+    // True termination (tray menu exit, dock right-click close, in-app exit):
+    // tear the tunnel down so no orphaned VPN keeps running without a
+    // controlling UI, and drop the status-bar (tray) icon.
+    vpnExtension.stopVpnExtensionAbility(VPN_WANT).catch((err: BusinessError) => {
+      hilog.warn(DOMAIN, 'testTag', 'stopVpnExtension on destroy failed: %{public}s', JSON.stringify(err));
+    });
+    if (this.trayReady) {
+      try {
+        statusBarManager.removeFromStatusBar(this.context);
+      } catch (err) {
+        // 1010710004: cannot remove while no window is in the foreground —
+        // the icon is cleaned up anyway once the process exits.
+        hilog.warn(DOMAIN, 'testTag', 'removeFromStatusBar failed: %{public}s', JSON.stringify(err));
+      }
+    }
+  }
+
+  // Runs on 2-in-1 (PC) and tablet only: the X button asks permission to close.
+  // With a tray icon present, hide the whole ability (window + taskbar entry)
+  // so the app keeps running from the status bar, like a classic tray app.
+  // Closing from the dock right-click menu bypasses this callback and
+  // terminates for real — that path also stops the VPN in onDestroy().
+  onPrepareToTerminate(): boolean {
+    hilog.info(DOMAIN, 'testTag', '%{public}s', 'close intercepted, hiding to tray');
+    if (this.trayReady) {
+      this.context.hideAbility().catch((err: BusinessError) => {
+        hilog.error(DOMAIN, 'testTag', 'hideAbility failed: %{public}s', JSON.stringify(err));
+        this.minimizeWindow();
+      });
+    } else {
+      this.minimizeWindow();
+    }
+    return true;
+  }
+
+  private minimizeWindow(): void {
+    if (this.mainWindow !== undefined) {
+      this.mainWindow.minimize().catch((err: BusinessError) => {
+        hilog.error(DOMAIN, 'testTag', 'minimize failed: %{public}s', JSON.stringify(err));
+      });
+    }
+  }
+
+  onNewWant(want: Want, launchParam: AbilityConstant.LaunchParam): void {
+    // Relaunching from the dock/launcher while hidden in the tray brings the
+    // window back (showAbility is a PC/tablet API; ignore it elsewhere).
+    if (this.trayReady) {
+      this.context.showAbility().catch((err: BusinessError) => {
+        hilog.warn(DOMAIN, 'testTag', 'showAbility failed: %{public}s', JSON.stringify(err));
+      });
+    }
+  }
+
+  private async loadTrayIcon(): Promise<image.PixelMap | undefined> {
+    try {
+      let data = this.context.resourceManager.getMediaContentSync($r('app.media.icon'));
+      let buf = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer;
+      let src = image.createImageSource(buf);
+      return await src.createPixelMap({ desiredSize: { width: 48, height: 48 } });
+    } catch (err) {
+      hilog.warn(DOMAIN, 'testTag', 'loadTrayIcon failed: %{public}s', JSON.stringify(err));
+      return undefined;
+    }
+  }
+
+  // Status-bar (tray) icon on 2-in-1 only; on phones the syscap is missing and
+  // everything below throws, leaving trayReady false and behavior unchanged.
+  private async setupTray(): Promise<void> {
+    let white = await this.loadTrayIcon();
+    let black = await this.loadTrayIcon();
+    if (white === undefined || black === undefined) {
+      return;
+    }
+    let showItem: statusBarManager.StatusBarMenuItem = {
+      title: '显示主窗口',
+      menuCode: TRAY_MENU_SHOW,
+      menuAction: { abilityName: 'EntryAbility', moduleName: 'entry', notifyOnly: true }
+    };
+    let exitItem: statusBarManager.StatusBarMenuItem = {
+      title: '退出 v2rayH',
+      menuCode: TRAY_MENU_EXIT,
+      menuAction: { abilityName: 'EntryAbility', moduleName: 'entry', notifyOnly: true }
+    };
+    let item: statusBarManager.StatusBarItem = {
+      icons: { white: white, black: black },
+      quickOperation: { title: 'v2rayH', height: 1, abilityName: '', moduleName: 'entry' },
+      statusBarGroupMenu: [[showItem], [exitItem]],
+      hoverTips: 'v2rayH 正在后台运行'
+    };
+    try {
+      statusBarManager.on('statusBarIconClick', (event: emitter.EventData) => {
+        this.context.showAbility().catch((err: BusinessError) => {
+          hilog.warn(DOMAIN, 'testTag', 'showAbility from tray click failed: %{public}s', JSON.stringify(err));
+        });
+      });
+      statusBarManager.on('rightMenuClick', (event: emitter.EventData) => {
+        let code = '';
+        let payload = event.data as Record<string, Object>;
+        if (payload['menuCode'] !== undefined) {
+          code = payload['menuCode'].toString();
+        }
+        if (code === TRAY_MENU_SHOW) {
+          this.context.showAbility().catch(() => {
+          });
+        } else if (code === TRAY_MENU_EXIT) {
+          this.quitFromTray();
+        }
+      });
+      statusBarManager.addToStatusBar(this.context, item, (err) => {
+        if (err) {
+          hilog.warn(DOMAIN, 'testTag', 'addToStatusBar failed: %{public}s', JSON.stringify(err));
+        } else {
+          this.trayReady = true;
+          hilog.info(DOMAIN, 'testTag', '%{public}s', 'tray icon ready');
+        }
+      });
+    } catch (err) {
+      hilog.warn(DOMAIN, 'testTag', 'setupTray failed (device without status bar): %{public}s', JSON.stringify(err));
+    }
+  }
+
+  private quitFromTray(): void {
+    vpnExtension.stopVpnExtensionAbility(VPN_WANT).catch((err: BusinessError) => {
+      hilog.warn(DOMAIN, 'testTag', 'stopVpnExtension from tray failed: %{public}s', JSON.stringify(err));
+    });
+    if (this.trayReady) {
+      try {
+        statusBarManager.removeFromStatusBar(this.context);
+      } catch (err) {
+        hilog.warn(DOMAIN, 'testTag', 'removeFromStatusBar on quit failed: %{public}s', JSON.stringify(err));
+      }
+    }
+    this.context.terminateSelf().catch((err: BusinessError) => {
+      hilog.error(DOMAIN, 'testTag', 'terminateSelf failed: %{public}s', JSON.stringify(err));
+    });
   }
 
   onWindowStageCreate(windowStage: window.WindowStage): void {
@@ -38,18 +193,25 @@ export default class EntryAbility extends UIAbility {
 
     try {
       let mainWindow = windowStage.getMainWindowSync();
+      this.mainWindow = mainWindow;
       mainWindow.setWindowLayoutFullScreen(true).then(() => {
         syncAvoidArea(mainWindow);
       }).catch((err: BusinessError) => {
         hilog.error(DOMAIN, 'testTag', 'Failed to set full screen. Cause: %{public}s', JSON.stringify(err));
       });
       syncAvoidArea(mainWindow);
+      syncWindowWidth(mainWindow);
       mainWindow.on('avoidAreaChange', (data: window.AvoidAreaOptions) => {
         if (data.type === window.AvoidAreaType.TYPE_SYSTEM) {
           AppStorage.setOrCreate('topRectHeight', data.area.topRect.height);
         } else if (data.type === window.AvoidAreaType.TYPE_NAVIGATION_INDICATOR) {
           AppStorage.setOrCreate('bottomRectHeight', data.area.bottomRect.height);
         }
+      });
+      // Free-window (PC) resizing drives the adaptive layout breakpoint.
+      mainWindow.on('windowSizeChange', (size: window.Size) => {
+        let density = display.getDefaultDisplaySync().densityPixels;
+        AppStorage.setOrCreate('winWidthVp', density > 0 ? size.width / density : size.width);
       });
     } catch (err) {
       hilog.error(DOMAIN, 'testTag', 'Failed to prepare immersive window. Cause: %{public}s', JSON.stringify(err));
@@ -61,6 +223,7 @@ export default class EntryAbility extends UIAbility {
         return;
       }
       hilog.info(DOMAIN, 'testTag', 'Succeeded in loading the content.');
+      this.setupTray();
     });
 
     try {
@@ -73,6 +236,7 @@ export default class EntryAbility extends UIAbility {
   onWindowStageDestroy(): void {
     // Main window is destroyed, release UI related resources
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onWindowStageDestroy');
+    this.mainWindow = undefined;
   }
 
   onForeground(): void {

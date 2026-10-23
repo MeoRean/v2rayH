@@ -1,4 +1,6 @@
 import { pasteboard } from '@kit.BasicServicesKit';
+import { deviceInfo } from '@kit.BasicServicesKit';
+import { abilityAccessCtrl, common } from '@kit.AbilityKit';
 import { scanBarcode } from '@kit.ScanKit';
 import { AppState } from '../common/AppState';
 import { AppTheme } from '../common/AppTheme';
@@ -19,8 +21,10 @@ export struct ConfigTab {
   @ObjectLink app: AppState;
   @StorageProp('themeRev') themeRev: number = 0;
   @Prop @Watch('onResetTick') resetTick: number = 0;
+  @StorageProp('openEditorTick') @Watch('onOpenEditor') openEditorTick: number = 0;
   @StorageProp('topRectHeight') topRectPx: number = 0;
   @StorageProp('bottomRectHeight') bottomRectPx: number = 0;
+  @StorageProp('winWidthVp') winWidthVp: number = 360;
   @State sub: number = SUB_OVERVIEW;
   @State groupNameDraft: string = '';
   @State groupUrlDraft: string = '';
@@ -32,14 +36,23 @@ export struct ConfigTab {
   @State mPort: string = '';
   @State mCredential: string = '';
   @State mMethod: string = 'aes-128-gcm';
+  @State mAlterId: string = '0';
+  @State mScy: string = 'auto';
+  @State mFlow: string = '';
   @State mNetwork: string = 'tcp';
   @State mPath: string = '';
+  @State mHost: string = '';
   @State mSecurity: string = 'none';
   @State mSni: string = '';
   @State mPbk: string = '';
   @State mSid: string = '';
   @State mFp: string = 'chrome';
+  @State mSpx: string = '/';
 
+
+  private isWide(): boolean {
+    return this.winWidthVp >= 600;
+  }
 
   private subTitle(): string {
     if (this.sub === SUB_GROUPS) {
@@ -52,12 +65,53 @@ export struct ConfigTab {
       return '资源文件';
     }
     if (this.sub === SUB_MANUAL) {
-      return '手动添加';
+      return this.app.editingIdx >= 0 ? '编辑节点' : '手动添加';
     }
     return '配置';
   }
 
+  private isEditing(): boolean {
+    return this.app.editingIdx >= 0 && this.app.editingIdx < this.app.servers.length;
+  }
+
+  // In the wide layout ConfigTab mounts on demand, so the editor must be
+  // restored both from the @Watch tick and at mount time.
+  private syncEditorDrafts(): void {
+    if (!this.isEditing()) {
+      return;
+    }
+    let s = this.app.servers[this.app.editingIdx];
+    this.mName = s.name;
+    this.mProtocol = s.protocol;
+    this.mAddress = s.address;
+    this.mPort = s.port.toString();
+    this.mCredential = s.protocol === 'vless' || s.protocol === 'vmess' ? s.uuid : s.password;
+    this.mMethod = s.method.length > 0 ? s.method : 'aes-128-gcm';
+    this.mAlterId = s.alterId.toString();
+    this.mScy = s.scy.length > 0 ? s.scy : 'auto';
+    this.mFlow = s.flow;
+    this.mNetwork = s.network.length > 0 ? s.network : 'tcp';
+    this.mPath = s.path;
+    this.mHost = s.host;
+    this.mSecurity = s.security.length > 0 ? s.security : 'none';
+    this.mSni = s.sni;
+    this.mPbk = s.pbk;
+    this.mSid = s.sid;
+    this.mFp = s.fp.length > 0 ? s.fp : 'chrome';
+    this.mSpx = s.spx.length > 0 ? s.spx : '/';
+    this.sub = SUB_MANUAL;
+  }
+
+  aboutToAppear(): void {
+    this.syncEditorDrafts();
+  }
+
+  onOpenEditor(): void {
+    this.syncEditorDrafts();
+  }
+
   onResetTick(): void {
+    this.app.cancelEdit();
     this.sub = SUB_OVERVIEW;
   }
 
@@ -72,7 +126,7 @@ export struct ConfigTab {
       return 'geosite / geoip 规则文件';
     }
     if (this.sub === SUB_MANUAL) {
-      return '手动填写节点参数';
+      return this.app.editingIdx >= 0 ? '修改已保存节点的参数' : '手动填写节点参数';
     }
     return '订阅 · 分流 · 资源';
   }
@@ -94,6 +148,7 @@ export struct ConfigTab {
           .height(36)
           .alignItems(VerticalAlign.Center)
           .onClick(() => {
+            this.app.cancelEdit();
             this.sub = SUB_OVERVIEW;
           })
         }
@@ -197,10 +252,34 @@ export struct ConfigTab {
     })
   }
 
+  private isPc(): boolean {
+    return deviceInfo.deviceType === '2in1';
+  }
+
+  // pasteboard.getData() requires READ_PASTEBOARD (user_grant) since API 12:
+  // ask once before the first read; the system dialog is shown only the first
+  // time or after the user revokes the grant in settings.
+  private async ensurePastePermission(): Promise<boolean> {
+    let ctx = this.getUIContext().getHostContext();
+    if (ctx === undefined) {
+      return false;
+    }
+    try {
+      let atManager = abilityAccessCtrl.createAtManager();
+      let res = await atManager.requestPermissionsFromUser(ctx,
+        ['ohos.permission.READ_PASTEBOARD']);
+      return res.authResults.length > 0 && res.authResults[0] === 0;
+    } catch (e) {
+      return false;
+    }
+  }
+
   @Builder
   importBar() {
     Row({ space: 10 }) {
-      this.importButton($r('sys.symbol.qrcode'), '扫码导入', ACT_SCAN)
+      if (!this.isPc()) {
+        this.importButton($r('sys.symbol.qrcode'), '扫码导入', ACT_SCAN)
+      }
       this.importButton($r('sys.symbol.doc_plaintext'), '剪贴板', ACT_CLIPBOARD)
       this.importButton($r('sys.symbol.plus_circle'), '手动添加', SUB_MANUAL)
     }
@@ -209,6 +288,10 @@ export struct ConfigTab {
   }
 
   private async importFromClipboard(): Promise<void> {
+    if (!(await this.ensurePastePermission())) {
+      this.app.status = '未授予剪贴板权限，可在设置中开启';
+      return;
+    }
     try {
       let board = pasteboard.getSystemPasteboard();
       let data = await board.getData();
@@ -437,19 +520,29 @@ export struct ConfigTab {
     if (this.isUuidProtocol()) {
       s.uuid = this.mCredential.trim();
       s.alterId = 0;
+      if (this.mProtocol === 'vless') {
+        s.flow = this.mFlow;
+      }
     } else {
       s.password = this.mCredential.trim();
+    }
+    if (this.mProtocol === 'vmess') {
+      let aid = parseInt(this.mAlterId, 10);
+      s.alterId = isNaN(aid) || aid < 0 ? 0 : aid;
+      s.scy = this.mScy;
     }
     if (this.mProtocol === 'shadowsocks') {
       s.method = this.mMethod.trim().length > 0 ? this.mMethod.trim() : 'aes-128-gcm';
     }
     s.network = this.mNetwork;
     s.path = this.mPath.trim();
+    s.host = this.mHost.trim();
     s.security = this.mSecurity;
     s.sni = this.mSni.trim();
     s.pbk = this.mPbk.trim();
     s.sid = this.mSid.trim();
     s.fp = this.mFp.trim().length > 0 ? this.mFp.trim() : 'chrome';
+    s.spx = this.mSpx.trim().length > 0 ? this.mSpx.trim() : '/';
     return s;
   }
 
@@ -457,6 +550,15 @@ export struct ConfigTab {
     let s = this.buildManualServer();
     if (s === undefined) {
       this.app.status = '请检查地址与端口';
+      return;
+    }
+    if (this.isEditing()) {
+      // Keep fields the form does not expose (tcp header type): dropping
+      // them would break nodes imported with http 伪装.
+      let old = this.app.servers[this.app.editingIdx];
+      s.headerType = old.headerType;
+      this.app.updateServer(this.app.editingIdx, s);
+      this.sub = SUB_OVERVIEW;
       return;
     }
     this.app.addServers([s], '本机节点');
@@ -507,8 +609,53 @@ export struct ConfigTab {
             }
           })
 
+          if (this.mProtocol === 'vless') {
+            Text('Flow（vision 流控，TLS/REALITY 时使用）')
+              .fontSize(12)
+              .fontColor(AppTheme.TEXT_SUB)
+              .width('100%')
+              .margin({ top: 14 })
+            Flex({ wrap: FlexWrap.Wrap }) {
+              CfgChoiceChip({ label: '无', active: this.mFlow.length === 0, onPick: () => {
+                this.mFlow = '';
+              } })
+              CfgChoiceChip({ label: 'xtls-rprx-vision', active: this.mFlow === 'xtls-rprx-vision', onPick: () => {
+                this.mFlow = 'xtls-rprx-vision';
+              } })
+            }
+            .width('100%')
+            .margin({ top: 4 })
+          }
+
+          if (this.mProtocol === 'vmess') {
+            CfgField({ label: '额外 ID (alterId)', value: this.mAlterId, placeholder: '通常为 0', onEdit: (v: string) => {
+              this.mAlterId = v;
+            } })
+            Text('VMess 加密')
+              .fontSize(12)
+              .fontColor(AppTheme.TEXT_SUB)
+              .width('100%')
+              .margin({ top: 14 })
+            Flex({ wrap: FlexWrap.Wrap }) {
+              CfgChoiceChip({ label: 'auto', active: this.mScy === 'auto', onPick: () => {
+                this.mScy = 'auto';
+              } })
+              CfgChoiceChip({ label: 'aes-128-gcm', active: this.mScy === 'aes-128-gcm', onPick: () => {
+                this.mScy = 'aes-128-gcm';
+              } })
+              CfgChoiceChip({ label: 'chacha20-poly1305', active: this.mScy === 'chacha20-poly1305', onPick: () => {
+                this.mScy = 'chacha20-poly1305';
+              } })
+              CfgChoiceChip({ label: 'none', active: this.mScy === 'none', onPick: () => {
+                this.mScy = 'none';
+              } })
+            }
+            .width('100%')
+            .margin({ top: 4 })
+          }
+
           if (this.mProtocol === 'shadowsocks') {
-            CfgField({ label: '加密方式', value: this.mMethod, placeholder: 'aes-128-gcm / chacha20-ietf-poly1305', onEdit: (v: string) => {
+            CfgField({ label: '加密方式', value: this.mMethod, placeholder: 'aes-128-gcm / chacha20-ietf-poly1305 / 2022-blake3-aes-128-gcm', onEdit: (v: string) => {
               this.mMethod = v;
             } })
           }
@@ -528,6 +675,12 @@ export struct ConfigTab {
             CfgChoiceChip({ label: 'gRPC', active: this.mNetwork === 'grpc', onPick: () => {
               this.mNetwork = 'grpc';
             } })
+            CfgChoiceChip({ label: 'HTTPUpgrade', active: this.mNetwork === 'httpupgrade', onPick: () => {
+              this.mNetwork = 'httpupgrade';
+            } })
+            CfgChoiceChip({ label: 'XHTTP', active: this.mNetwork === 'xhttp', onPick: () => {
+              this.mNetwork = 'xhttp';
+            } })
           }
           .width('100%')
           .margin({ top: 4 })
@@ -536,6 +689,17 @@ export struct ConfigTab {
             CfgField({ label: this.mNetwork === 'grpc' ? '服务名' : '路径 (path)', value: this.mPath, placeholder: '/ws', onEdit: (v: string) => {
               this.mPath = v;
             } })
+          }
+
+          if (this.mNetwork === 'ws' || this.mNetwork === 'httpupgrade' || this.mNetwork === 'xhttp') {
+            CfgField({
+              label: 'Host (伪装域名)',
+              value: this.mHost,
+              placeholder: '与地址不同时必填，例如 cdn.example.com',
+              onEdit: (v: string) => {
+                this.mHost = v;
+              }
+            })
           }
 
           Text('安全')
@@ -558,7 +722,7 @@ export struct ConfigTab {
           .margin({ top: 4 })
 
           if (this.mSecurity === 'tls' || this.mSecurity === 'reality') {
-            CfgField({ label: 'SNI', value: this.mSni, placeholder: '例如 www.example.com', onEdit: (v: string) => {
+            CfgField({ label: 'SNI', value: this.mSni, placeholder: '留空时自动使用 Host', onEdit: (v: string) => {
               this.mSni = v;
             } })
           }
@@ -569,12 +733,24 @@ export struct ConfigTab {
             CfgField({ label: 'Short ID', value: this.mSid, placeholder: '可留空', onEdit: (v: string) => {
               this.mSid = v;
             } })
-            CfgField({ label: '指纹 (fp)', value: this.mFp, placeholder: 'chrome', onEdit: (v: string) => {
-              this.mFp = v;
+          }
+          if (this.mSecurity === 'tls' || this.mSecurity === 'reality') {
+            CfgField({
+              label: '指纹 (fp)',
+              value: this.mFp,
+              placeholder: 'chrome / firefox / safari / ios / random',
+              onEdit: (v: string) => {
+                this.mFp = v;
+              }
+            })
+          }
+          if (this.mSecurity === 'reality') {
+            CfgField({ label: 'SpiderX (spx)', value: this.mSpx, placeholder: '默认 /', onEdit: (v: string) => {
+              this.mSpx = v;
             } })
           }
 
-          Button('保存到「' + this.app.activeGroupName() + '」')
+          Button(this.isEditing() ? '保存修改' : '保存到「' + this.app.activeGroupName() + '」')
             .width('100%')
             .height(46)
             .fontSize(15)
@@ -663,56 +839,104 @@ export struct ConfigTab {
   routingPage() {
     Scroll() {
       Column() {
-        Column() {
-          Row() {
-            Column() {
-              Text('绕过中国大陆')
-                .fontSize(15)
-                .fontColor(AppTheme.TEXT)
-              Text('geosite:cn 与 geoip:cn 直连')
-                .fontSize(11)
-                .fontColor(AppTheme.TEXT_SUB)
-                .margin({ top: 3 })
-            }
-            .layoutWeight(1)
-            .alignItems(HorizontalAlign.Start)
-
-            Toggle({ type: ToggleType.Switch, isOn: this.app.routeBypassCn })
-              .onChange((v: boolean) => {
-                this.app.setBypassCn(v);
-              })
+      Column() {
+        Row() {
+          Column() {
+            Text('绕过局域网 IP')
+              .fontSize(15)
+              .fontColor(AppTheme.TEXT)
+            Text('192.168.x / 10.x / 172.16-31.x / 回环地址直连')
+              .fontSize(11)
+              .fontColor(AppTheme.TEXT_SUB)
+              .margin({ top: 3 })
           }
-          .width('100%')
-          .alignItems(VerticalAlign.Center)
-          .padding({ left: 16, right: 16, top: 12, bottom: 12 })
+          .layoutWeight(1)
+          .alignItems(HorizontalAlign.Start)
 
-          Divider().strokeWidth(1).color(AppTheme.DIVIDER).margin({ left: 16, right: 16 })
-
-          Row() {
-            Column() {
-              Text('拦截广告')
-                .fontSize(15)
-                .fontColor(AppTheme.TEXT)
-              Text('geosite:category-ads-all 走 blackhole')
-                .fontSize(11)
-                .fontColor(AppTheme.TEXT_SUB)
-                .margin({ top: 3 })
-            }
-            .layoutWeight(1)
-            .alignItems(HorizontalAlign.Start)
-
-            Toggle({ type: ToggleType.Switch, isOn: this.app.routeBlockAds })
-              .onChange((v: boolean) => {
-                this.app.setBlockAds(v);
-              })
-          }
-          .width('100%')
-          .alignItems(VerticalAlign.Center)
-          .padding({ left: 16, right: 16, top: 12, bottom: 12 })
+          Toggle({ type: ToggleType.Switch, isOn: this.app.routeBypassLan })
+            .onChange((v: boolean) => {
+              this.app.setBypassLan(v);
+            })
         }
         .width('100%')
-        .backgroundColor(AppTheme.CARD_BG)
-        .borderRadius(AppTheme.CARD_RADIUS)
+        .alignItems(VerticalAlign.Center)
+        .padding({ left: 16, right: 16, top: 12, bottom: 12 })
+
+        Divider().strokeWidth(1).color(AppTheme.DIVIDER).margin({ left: 16, right: 16 })
+
+        Row() {
+          Column() {
+            Text('绕过局域网域名')
+              .fontSize(15)
+              .fontColor(AppTheme.TEXT)
+            Text('geosite:private 直连（local / lan / home.arpa 等）')
+              .fontSize(11)
+              .fontColor(AppTheme.TEXT_SUB)
+              .margin({ top: 3 })
+          }
+          .layoutWeight(1)
+          .alignItems(HorizontalAlign.Start)
+
+          Toggle({ type: ToggleType.Switch, isOn: this.app.routeBypassLanDomains })
+            .onChange((v: boolean) => {
+              this.app.setBypassLanDomains(v);
+            })
+        }
+        .width('100%')
+        .alignItems(VerticalAlign.Center)
+        .padding({ left: 16, right: 16, top: 12, bottom: 12 })
+
+        Divider().strokeWidth(1).color(AppTheme.DIVIDER).margin({ left: 16, right: 16 })
+
+        Row() {
+          Column() {
+            Text('绕过中国大陆')
+              .fontSize(15)
+              .fontColor(AppTheme.TEXT)
+            Text('geosite:cn 与 geoip:cn 直连')
+              .fontSize(11)
+              .fontColor(AppTheme.TEXT_SUB)
+              .margin({ top: 3 })
+          }
+          .layoutWeight(1)
+          .alignItems(HorizontalAlign.Start)
+
+          Toggle({ type: ToggleType.Switch, isOn: this.app.routeBypassCn })
+            .onChange((v: boolean) => {
+              this.app.setBypassCn(v);
+            })
+        }
+        .width('100%')
+        .alignItems(VerticalAlign.Center)
+        .padding({ left: 16, right: 16, top: 12, bottom: 12 })
+
+        Divider().strokeWidth(1).color(AppTheme.DIVIDER).margin({ left: 16, right: 16 })
+
+        Row() {
+          Column() {
+            Text('拦截广告')
+              .fontSize(15)
+              .fontColor(AppTheme.TEXT)
+            Text('geosite:category-ads-all 走 blackhole')
+              .fontSize(11)
+              .fontColor(AppTheme.TEXT_SUB)
+              .margin({ top: 3 })
+          }
+          .layoutWeight(1)
+          .alignItems(HorizontalAlign.Start)
+
+          Toggle({ type: ToggleType.Switch, isOn: this.app.routeBlockAds })
+            .onChange((v: boolean) => {
+              this.app.setBlockAds(v);
+            })
+        }
+        .width('100%')
+        .alignItems(VerticalAlign.Center)
+        .padding({ left: 16, right: 16, top: 12, bottom: 12 })
+      }
+      .width('100%')
+      .backgroundColor(AppTheme.CARD_BG)
+      .borderRadius(AppTheme.CARD_RADIUS)
 
         Row({ space: 8 }) {
           TextInput({ text: this.directDraft, placeholder: '直连域名，如 example.com' })
@@ -818,6 +1042,10 @@ export struct ConfigTab {
   }
 
   private async pasteGeoLinks(): Promise<void> {
+    if (!(await this.ensurePastePermission())) {
+      this.app.status = '未授予剪贴板权限，可在设置中开启';
+      return;
+    }
     try {
       let board = pasteboard.getSystemPasteboard();
       let data = await board.getData();
@@ -965,7 +1193,7 @@ export struct ConfigTab {
       left: AppTheme.PAGE_GAP,
       right: AppTheme.PAGE_GAP,
       top: px2vp(this.topRectPx) + 8,
-      bottom: px2vp(this.bottomRectPx) + AppTheme.BAR_RESERVE
+      bottom: this.isWide() ? 20 : px2vp(this.bottomRectPx) + AppTheme.BAR_RESERVE
     })
   }
 }

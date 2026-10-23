@@ -11,6 +11,10 @@
     {
       "name": "EntryAbility_label",
       "value": "v2rayH"
+    },
+    {
+      "name": "pasteboard_reason",
+      "value": "Used to read the subscription link copied to the clipboard"
     }
   ]
 }

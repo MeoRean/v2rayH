@@ -15,17 +15,45 @@ function buildStreamSettings(s: ServerConfig): string {
     let ws = '{';
     ws += q('path') + ':' + q(s.path.length > 0 ? s.path : '/');
     if (s.host.length > 0) {
-      ws += ',' + q('headers') + ':{' + q('Host') + ':' + q(s.host) + '}';
+      // Top-level "host" replaced the deprecated "headers":{"Host":...} —
+      // the kernel still accepts the old form but warns on every start.
+      ws += ',' + q('host') + ':' + q(s.host);
     }
     ws += '}';
     parts.push(q('wsSettings') + ':' + ws);
   } else if (net === 'grpc') {
-    parts.push(q('grpcSettings') + ':{' + q('serviceName') + ':' + q(s.path) + '}');
+    let gs = '{' + q('serviceName') + ':' + q(s.path);
+    if (s.host.length > 0) {
+      gs += ',' + q('authority') + ':' + q(s.host);
+    }
+    gs += '}';
+    parts.push(q('grpcSettings') + ':' + gs);
+  } else if (net === 'httpupgrade') {
+    let hu = '{' + q('path') + ':' + q(s.path.length > 0 ? s.path : '/');
+    if (s.host.length > 0) {
+      hu += ',' + q('host') + ':' + q(s.host);
+    }
+    hu += '}';
+    parts.push(q('httpupgradeSettings') + ':' + hu);
+  } else if (net === 'xhttp' || net === 'splithttp') {
+    parts[0] = q('network') + ':' + q('xhttp');
+    let xh = '{' + q('path') + ':' + q(s.path.length > 0 ? s.path : '/');
+    xh += ',' + q('mode') + ':' + q('auto');
+    if (s.host.length > 0) {
+      xh += ',' + q('host') + ':' + q(s.host);
+    }
+    xh += '}';
+    parts.push(q('xhttpSettings') + ':' + xh);
   }
+
+  // CDN nodes dial an IP (优选IP) but present the domain: when the user only
+  // fills the Host field (v2rayNG-style single field), the TLS SNI must not
+  // fall back to the IP — otherwise the CDN rejects the handshake.
+  let effectiveSni = s.sni.length > 0 ? s.sni : s.host;
 
   if (s.security === 'reality') {
     let rs = '{';
-    rs += q('serverName') + ':' + q(s.sni);
+    rs += q('serverName') + ':' + q(effectiveSni);
     rs += ',' + q('fingerprint') + ':' + q(s.fp.length > 0 ? s.fp : 'chrome');
     rs += ',' + q('publicKey') + ':' + q(s.pbk);
     rs += ',' + q('shortId') + ':' + q(s.sid);
@@ -35,10 +63,12 @@ function buildStreamSettings(s: ServerConfig): string {
     parts.push(q('realitySettings') + ':' + rs);
   } else if (s.security === 'tls') {
     let ts = '{';
-    ts += q('serverName') + ':' + q(s.sni);
+    ts += q('serverName') + ':' + q(effectiveSni);
     if (s.fp.length > 0) {
       ts += ',' + q('fingerprint') + ':' + q(s.fp);
     }
+    // NOTE: do NOT emit "allowInsecure" — the vendored Xray removed it
+    // (migrated to pinnedPeerCertSha256) and rejects any config containing it.
     ts += '}';
     parts.push(q('security') + ':' + q('tls'));
     parts.push(q('tlsSettings') + ':' + ts);
@@ -59,7 +89,9 @@ function buildProxyOutbound(s: ServerConfig): string {
     let vnext = '{' + q('address') + ':' + q(s.address) + ',' + q('port') + ':' + s.port.toString() + ',' + q('users') + ':[' + user + ']}';
     body = '{' + q('protocol') + ':' + q('vless') + ',' + q('settings') + ':{' + q('vnext') + ':[' + vnext + ']},' + q('streamSettings') + ':' + stream + '}';
   } else if (s.protocol === 'vmess') {
-    let user = '{' + q('id') + ':' + q(s.uuid) + ',' + q('alterId') + ':' + s.alterId.toString() + ',' + q('security') + ':' + q('auto') + '}';
+    let scy = s.scy.length > 0 ? s.scy : 'auto';
+    let user = '{' + q('id') + ':' + q(s.uuid) + ',' + q('alterId') + ':' + s.alterId.toString()
+      + ',' + q('security') + ':' + q(scy) + '}';
     let vnext = '{' + q('address') + ':' + q(s.address) + ',' + q('port') + ':' + s.port.toString() + ',' + q('users') + ':[' + user + ']}';
     body = '{' + q('protocol') + ':' + q('vmess') + ',' + q('settings') + ':{' + q('vnext') + ':[' + vnext + ']},' + q('streamSettings') + ':' + stream + '}';
   } else if (s.protocol === 'trojan') {
@@ -105,7 +137,12 @@ function domainList(items: string[]): string {
 function buildRouting(r: RoutingOptions): string {
   let rules: string[] = [];
   rules.push('{"type":"field","inboundTag":["http-in"],"outboundTag":"proxy"}');
-  rules.push('{"type":"field","ip":["geoip:private"],"outboundTag":"direct"}');
+  if (r.bypassLan) {
+    rules.push('{"type":"field","ip":["geoip:private"],"outboundTag":"direct"}');
+  }
+  if (r.bypassLanDomains) {
+    rules.push('{"type":"field","domain":["geosite:private"],"outboundTag":"direct"}');
+  }
   if (r.blockAds) {
     rules.push('{"type":"field","domain":["geosite:category-ads-all"],"outboundTag":"block"}');
   }

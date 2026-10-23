@@ -61,6 +61,31 @@ devecocli build
 devecocli run --skip-build
 ```
 
+## PC (2-in-1) adaptation
+
+`deviceTypes` includes `2in1`, so the HAP installs on HarmonyOS PCs.
+
+- **Adaptive layout** — `EntryAbility` tracks the window width
+  (`windowSizeChange` → `AppStorage('winWidthVp')`). At ≥ 600vp (the lg
+  breakpoint) `Index` swaps the phone bottom tab bar for a side navigation
+  rail with a width-capped (840vp), centered content column; below that the
+  original phone layout stays. Drag the window across the breakpoint and the
+  layout follows live.
+- **Close-to-tray** — with `ohos.permission.PREPARE_APP_TERMINATE`,
+  `onPrepareToTerminate()` intercepts the window X button on 2-in-1/tablet.
+  On PC the app registers a status-bar (tray) icon via
+  `@kit.DeskTopExtensionKit` `statusBarManager` at startup: left-click the
+  icon to bring the window back, right-click for「显示主窗口 / 退出 v2rayH」
+  (handled through `notifyOnly` menu events). Closing with X calls
+  `hideAbility()` — window *and* taskbar entry disappear, the app lives in
+  the tray and the VPN stays up. Quitting from the tray menu (or the dock
+  right-click close, which bypasses the interceptor) terminates for real;
+  `EntryAbility.onDestroy()` then stops the VPN extension so no orphaned
+  tunnel survives. Settings also offers an in-app「断开并退出」action with
+  the same semantics. Phones/tablets without the status-bar syscap skip tray
+  setup entirely (`trayReady` stays false, X falls back to a plain
+  minimize).
+
 ## CI
 
 `.github/workflows/build-libxray.yml` runs on manual dispatch, on

@@ -8,6 +8,11 @@ export struct HomeTab {
   @StorageProp('themeRev') themeRev: number = 0;
   @StorageProp('topRectHeight') topRectPx: number = 0;
   @StorageProp('bottomRectHeight') bottomRectPx: number = 0;
+  @StorageProp('winWidthVp') winWidthVp: number = 360;
+
+  private isWide(): boolean {
+    return this.winWidthVp >= 600;
+  }
 
   private ipLabel(): string {
     if (!this.app.connected && !this.app.ipBusy) {
@@ -106,6 +111,28 @@ export struct HomeTab {
     .margin({ top: 16, bottom: 8 })
   }
 
+  private confirmRemoveNode(idx: number): void {
+    if (idx < 0 || idx >= this.app.servers.length) {
+      return;
+    }
+    let node = this.app.servers[idx];
+    AlertDialog.show({
+      title: '删除节点',
+      message: '确定删除「' + node.name + '」？',
+      primaryButton: {
+        value: '取消',
+        action: () => {
+        }
+      },
+      secondaryButton: {
+        value: '删除',
+        action: () => {
+          this.app.removeServer(idx);
+        }
+      }
+    });
+  }
+
   @Builder
   nodeRow(item: ServerConfig, idx: number) {
     Row() {
@@ -132,6 +159,24 @@ export struct HomeTab {
         .fontSize(12)
         .fontColor(AppTheme.TEXT_SUB)
         .margin({ right: 8 })
+
+      SymbolGlyph($r('sys.symbol.square_and_pencil'))
+        .fontSize(17)
+        .fontColor([AppTheme.TEXT_SUB])
+        .padding(6)
+        .margin({ right: 2 })
+        .onClick(() => {
+          this.app.startEdit(idx);
+        })
+
+      SymbolGlyph($r('sys.symbol.trash'))
+        .fontSize(17)
+        .fontColor([AppTheme.DANGER])
+        .padding(6)
+        .margin({ right: 2 })
+        .onClick(() => {
+          this.confirmRemoveNode(idx);
+        })
 
       if (this.app.selected === idx) {
         SymbolGlyph($r('sys.symbol.checkmark_circle_fill'))
@@ -202,7 +247,7 @@ export struct HomeTab {
       }
 
       Button(this.app.connected ? '断开连接' : '连接')
-        .width('100%')
+        .width(this.isWide() ? 420 : '100%')
         .height(52)
         .fontSize(17)
         .fontWeight(FontWeight.Medium)
@@ -224,7 +269,7 @@ export struct HomeTab {
       left: AppTheme.PAGE_GAP,
       right: AppTheme.PAGE_GAP,
       top: px2vp(this.topRectPx) + 8,
-      bottom: px2vp(this.bottomRectPx) + AppTheme.BAR_RESERVE
+      bottom: this.isWide() ? 20 : px2vp(this.bottomRectPx) + AppTheme.BAR_RESERVE
     })
   }
 }

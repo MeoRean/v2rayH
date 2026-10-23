@@ -1,3 +1,4 @@
+import { common } from '@kit.AbilityKit';
 import { AppState } from '../common/AppState';
 import { AppTheme } from '../common/AppTheme';
 
@@ -5,6 +6,7 @@ const SET_NAV: number = 0;
 const SET_BACKUP: number = 1;
 const SET_ABOUT: number = 2;
 const SET_APPEARANCE: number = 3;
+const SET_LOGS: number = 4;
 
 @Component
 export struct SettingsTab {
@@ -13,7 +15,19 @@ export struct SettingsTab {
   @Prop @Watch('onResetTick') resetTick: number = 0;
   @StorageProp('topRectHeight') topRectPx: number = 0;
   @StorageProp('bottomRectHeight') bottomRectPx: number = 0;
+  @StorageProp('winWidthVp') winWidthVp: number = 360;
   @State sub: number = SET_NAV;
+  @State xrayLog: string = '';
+  @State vpnLog: string = '';
+
+  private loadLogs(): void {
+    this.xrayLog = this.app.readLogTail('xray_error.log', 12 * 1024);
+    this.vpnLog = this.app.readLogTail('vpn.log', 12 * 1024);
+  }
+
+  private isWide(): boolean {
+    return this.winWidthVp >= 600;
+  }
 
   onResetTick(): void {
     this.sub = SET_NAV;
@@ -28,6 +42,9 @@ export struct SettingsTab {
     }
     if (this.sub === SET_ABOUT) {
       return '关于';
+    }
+    if (this.sub === SET_LOGS) {
+      return '连接日志';
     }
     return '设置';
   }
@@ -110,7 +127,92 @@ export struct SettingsTab {
     .shadow({ radius: 14, color: '#10000000', offsetY: 3 })
     .onClick(() => {
       this.sub = target;
+      if (target === SET_LOGS) {
+        this.loadLogs();
+      }
     })
+  }
+
+  @Builder
+  logSection(title: string, body: string) {
+    Column() {
+      Text(title)
+        .fontSize(13)
+        .fontWeight(FontWeight.Medium)
+        .fontColor(AppTheme.TEXT)
+        .width('100%')
+      if (body.length === 0) {
+        Text('（空）')
+          .fontSize(11)
+          .fontColor(AppTheme.TEXT_WEAK)
+          .margin({ top: 6 })
+      } else {
+        Text(body)
+          .fontSize(11)
+          .fontColor(AppTheme.TEXT_SUB)
+          .fontFamily('monospace')
+          .width('100%')
+          .alignSelf(ItemAlign.Start)
+          .copyOption(CopyOptions.LocalDevice)
+          .margin({ top: 6 })
+      }
+    }
+    .width('100%')
+    .padding(14)
+    .backgroundColor(AppTheme.CARD_BG)
+    .borderRadius(AppTheme.CARD_RADIUS)
+    .alignItems(HorizontalAlign.Start)
+    .margin({ bottom: 12 })
+  }
+
+  @Builder
+  logsPage() {
+    Scroll() {
+      Column() {
+        Row() {
+          Text('连接失败时，这里能看到内核的真实报错')
+            .fontSize(11)
+            .fontColor(AppTheme.TEXT_WEAK)
+            .layoutWeight(1)
+          Button('清空')
+            .fontSize(12)
+            .height(30)
+            .fontColor(AppTheme.DANGER)
+            .backgroundColor(AppTheme.DANGER_SOFT)
+            .borderRadius(15)
+            .margin({ right: 8 })
+            .onClick(() => {
+              this.app.clearLogs();
+              this.loadLogs();
+            })
+          Button('刷新')
+            .fontSize(12)
+            .height(30)
+            .fontColor(AppTheme.PRIMARY)
+            .backgroundColor(AppTheme.PRIMARY_SOFT)
+            .borderRadius(15)
+            .onClick(() => {
+              this.loadLogs();
+            })
+        }
+        .width('100%')
+        .alignItems(VerticalAlign.Center)
+        .margin({ bottom: 12 })
+
+        this.logSection('xray_error.log（内核错误）', this.xrayLog)
+        this.logSection('vpn.log（VPN 扩展）', this.vpnLog)
+
+        Text('长按日志内容可全选复制。日志会随连接重试增长，这里仅显示末尾 12KB。')
+          .fontSize(11)
+          .fontColor(AppTheme.TEXT_WEAK)
+          .width('100%')
+      }
+      .width('100%')
+    }
+    .width('100%')
+    .layoutWeight(1)
+    .scrollBar(BarState.Off)
+    .edgeEffect(EdgeEffect.Spring)
   }
 
   @Builder
@@ -119,9 +221,52 @@ export struct SettingsTab {
       this.navRow($r('sys.symbol.paintbrush_pointed_filled_circle'), '外观', '深色模式与主题色 · ' + this.app.darkModeText(), SET_APPEARANCE)
       this.navRow($r('sys.symbol.doc'), '备份与还原', '导出 / 导入配置', SET_BACKUP)
       this.navRow($r('sys.symbol.info_circle'), '关于', '版本与内核信息', SET_ABOUT)
+      this.navRow($r('sys.symbol.doc_plaintext'), '连接日志', '内核报错与 VPN 扩展日志', SET_LOGS)
+
+      Column() {
+        this.actionRow($r('sys.symbol.power'), '断开并退出', '停止 VPN 并结束应用（PC 上也可右键任务栏图标退出）', true, () => {
+          this.confirmExit();
+        })
+      }
+      .width('100%')
+      .backgroundColor(AppTheme.CARD_BG)
+      .borderRadius(AppTheme.CARD_RADIUS)
+      .shadow({ radius: 14, color: '#10000000', offsetY: 3 })
+      .margin({ top: 12 })
     }
     .width('100%')
     .margin({ top: 18 })
+  }
+
+  private confirmExit(): void {
+    AlertDialog.show({
+      title: '断开并退出',
+      message: this.app.connected ? '将断开 VPN 连接并退出应用，后台代理会一并停止。' : '将退出应用（当前未连接 VPN）。',
+      primaryButton: {
+        value: '取消',
+        action: () => {
+        }
+      },
+      secondaryButton: {
+        value: '退出',
+        action: () => {
+          this.exitApp();
+        }
+      }
+    });
+  }
+
+  private exitApp(): void {
+    this.app.disconnect();
+    let ctx = this.getUIContext().getHostContext();
+    if (ctx !== undefined) {
+      try {
+        (ctx as common.UIAbilityContext).terminateSelf().catch(() => {
+        });
+      } catch (e) {
+        // 退出失败时保持运行，用户可从任务栏重试
+      }
+    }
   }
 
   @Builder
@@ -197,6 +342,9 @@ export struct SettingsTab {
     }
     if (this.sub === SET_ABOUT) {
       return '版本与内核信息';
+    }
+    if (this.sub === SET_LOGS) {
+      return '内核与 VPN 扩展运行日志';
     }
     return '备份数据与应用信息';
   }
@@ -368,6 +516,8 @@ export struct SettingsTab {
         this.aboutPage()
       } else if (this.sub === SET_APPEARANCE) {
         this.appearancePage()
+      } else if (this.sub === SET_LOGS) {
+        this.logsPage()
       } else {
         this.navPage()
         Blank()
@@ -379,7 +529,7 @@ export struct SettingsTab {
       left: AppTheme.PAGE_GAP,
       right: AppTheme.PAGE_GAP,
       top: px2vp(this.topRectPx) + 8,
-      bottom: px2vp(this.bottomRectPx) + AppTheme.BAR_RESERVE
+      bottom: this.isWide() ? 20 : px2vp(this.bottomRectPx) + AppTheme.BAR_RESERVE
     })
   }
 }
