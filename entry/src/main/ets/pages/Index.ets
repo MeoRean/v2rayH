@@ -1,4 +1,5 @@
 import { uiMaterial } from '@kit.ArkUI';
+import { deviceInfo } from '@kit.BasicServicesKit';
 import { AppTheme } from '../common/AppTheme';
 import { AppState } from '../common/AppState';
 import { HomeTab } from '../view/HomeTab';
@@ -6,7 +7,10 @@ import { ConfigTab } from '../view/ConfigTab';
 import { SettingsTab } from '../view/SettingsTab';
 
 // HarmonyOS lg breakpoint: >= 600vp switches to the side-rail (PC) layout.
+// Hysteresis of +/-20vp keeps windows resting near the breakpoint from
+// flip-flopping the root layout (observed as a resize glitch storm on pads).
 const WIDE_BREAKPOINT_VP: number = 600;
+const WIDE_HYSTERESIS_VP: number = 20;
 const CONTENT_MAX_WIDTH: number = 840;
 
 @Entry
@@ -17,14 +21,25 @@ struct Index {
   @State configReset: number = 0;
   @State settingsReset: number = 0;
   @StorageProp('bottomRectHeight') bottomRectPx: number = 0;
-  @StorageProp('winWidthVp') winWidthVp: number = 360;
+  @StorageProp('winWidthVp') @Watch('onWinWidthChanged') winWidthVp: number = 360;
+  @StorageLink('wideMode') wideMode: boolean = false;
   @StorageProp('systemDarkFlag') @Watch('onSystemDark') systemDarkFlag: boolean = false;
   @StorageProp('openEditorTick') @Watch('onOpenEditor') openEditorTick: number = 0;
   @StorageLink('themeRev') themeRev: number = 0;
   private tabsController: TabsController = new TabsController();
 
-  private isWide(): boolean {
-    return this.winWidthVp >= WIDE_BREAKPOINT_VP;
+  onWinWidthChanged(): void {
+    if (deviceInfo.deviceType === 'tablet') {
+      // Bisect an unresolved pad glitch storm: tablets stay on the phone
+      // layout so the rail/tab root swap can never run there.
+      this.wideMode = false;
+      return;
+    }
+    if (!this.wideMode && this.winWidthVp >= WIDE_BREAKPOINT_VP + WIDE_HYSTERESIS_VP) {
+      this.wideMode = true;
+    } else if (this.wideMode && this.winWidthVp < WIDE_BREAKPOINT_VP - WIDE_HYSTERESIS_VP) {
+      this.wideMode = false;
+    }
   }
 
   onSystemDark(): void {
@@ -53,6 +68,8 @@ struct Index {
     if (ctx !== undefined) {
       this.app.init(ctx);
     }
+    // Initial mode from the width the ability committed before loadContent.
+    this.wideMode = deviceInfo.deviceType !== 'tablet' && this.winWidthVp >= WIDE_BREAKPOINT_VP;
   }
 
   @Builder
@@ -210,7 +227,7 @@ struct Index {
   }
 
   build() {
-    if (this.isWide()) {
+    if (this.wideMode) {
       this.wideLayout()
     } else {
       this.compactLayout()

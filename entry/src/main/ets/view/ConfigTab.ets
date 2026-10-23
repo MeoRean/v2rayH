@@ -24,7 +24,7 @@ export struct ConfigTab {
   @StorageProp('openEditorTick') @Watch('onOpenEditor') openEditorTick: number = 0;
   @StorageProp('topRectHeight') topRectPx: number = 0;
   @StorageProp('bottomRectHeight') bottomRectPx: number = 0;
-  @StorageProp('winWidthVp') winWidthVp: number = 360;
+  @StorageProp('wideMode') wideMode: boolean = false;
   @State sub: number = SUB_OVERVIEW;
   @State groupNameDraft: string = '';
   @State groupUrlDraft: string = '';
@@ -51,7 +51,7 @@ export struct ConfigTab {
 
 
   private isWide(): boolean {
-    return this.winWidthVp >= 600;
+    return this.wideMode;
   }
 
   private subTitle(): string {

@@ -9,9 +9,10 @@ export struct HomeTab {
   @StorageProp('topRectHeight') topRectPx: number = 0;
   @StorageProp('bottomRectHeight') bottomRectPx: number = 0;
   @StorageProp('winWidthVp') winWidthVp: number = 360;
+  @StorageProp('wideMode') wideMode: boolean = false;
 
   private isWide(): boolean {
-    return this.winWidthVp >= 600;
+    return this.wideMode;
   }
 
   private ipLabel(): string {

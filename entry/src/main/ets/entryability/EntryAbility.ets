@@ -2,6 +2,7 @@ import { AbilityConstant, ConfigurationConstant, UIAbility, Want, Configuration 
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { BusinessError, emitter } from '@kit.BasicServicesKit';
 import { window, display } from '@kit.ArkUI';
+import { deviceInfo } from '@kit.BasicServicesKit';
 import { image } from '@kit.ImageKit';
 import { statusBarManager } from '@kit.DeskTopExtensionKit';
 import { vpnExtension } from '@kit.NetworkKit';
@@ -22,20 +23,50 @@ function syncAvoidArea(win: window.Window): void {
   }
 }
 
-function syncWindowWidth(win: window.Window): void {
-  try {
-    let px = win.getWindowProperties().windowRect.width;
-    let density = display.getDefaultDisplaySync().densityPixels;
-    let vp = density > 0 ? px / density : px;
-    AppStorage.setOrCreate('winWidthVp', vp);
-  } catch (err) {
-    hilog.error(DOMAIN, 'testTag', 'Failed to get window size. Cause: %{public}s', JSON.stringify(err));
-  }
-}
-
 export default class EntryAbility extends UIAbility {
   private mainWindow: window.Window | undefined = undefined;
   private trayReady: boolean = false;
+  // Window size events arrive per animation frame during restore/resize on
+  // tablets; committing each one makes the adaptive layout thrash between the
+  // rail and tab roots. Only commit after the size has settled.
+  private pendingWinWidthVp: number = -1;
+  private winWidthCommitTimer: number = -1;
+  private lastCommittedWinWidthVp: number = -1;
+
+  private pxToVp(px: number): number {
+    try {
+      let density = display.getDefaultDisplaySync().densityPixels;
+      return density > 0 ? px / density : px;
+    } catch (err) {
+      return px;
+    }
+  }
+
+  private commitWinWidthVp(vp: number): void {
+    if (vp < 100 || !isFinite(vp)) {
+      // Transient rects while minimizing/restoring — never drive layout.
+      return;
+    }
+    if (Math.abs(vp - this.lastCommittedWinWidthVp) < 1) {
+      return;
+    }
+    this.lastCommittedWinWidthVp = vp;
+    AppStorage.setOrCreate('winWidthVp', vp);
+    hilog.info(DOMAIN, 'testTag', 'winWidthVp commit: %{public}s', vp.toFixed(1));
+  }
+
+  private onWindowWidthEvent(px: number): void {
+    this.pendingWinWidthVp = this.pxToVp(px);
+    if (this.winWidthCommitTimer >= 0) {
+      clearTimeout(this.winWidthCommitTimer);
+    }
+    this.winWidthCommitTimer = setTimeout(() => {
+      this.winWidthCommitTimer = -1;
+      if (this.pendingWinWidthVp > 0) {
+        this.commitWinWidthVp(this.pendingWinWidthVp);
+      }
+    }, 120);
+  }
 
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onCreate');
@@ -44,6 +75,7 @@ export default class EntryAbility extends UIAbility {
   }
 
   onConfigurationUpdate(newConfig: Configuration): void {
+    hilog.info(DOMAIN, 'testTag', '%{public}s', 'onConfigurationUpdate');
     AppStorage.setOrCreate('systemDarkFlag',
       newConfig.colorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK);
   }
@@ -68,11 +100,12 @@ export default class EntryAbility extends UIAbility {
   }
 
   // Runs on 2-in-1 (PC) and tablet only: the X button asks permission to close.
-  // With a tray icon present, hide the whole ability (window + taskbar entry)
-  // so the app keeps running from the status bar, like a classic tray app.
-  // Closing from the dock right-click menu bypasses this callback and
-  // terminates for real — that path also stops the VPN in onDestroy().
+  // Intercept only on PC, where the tray icon keeps the app reachable — on a
+  // tablet there is no tray, so a blocked close would strand the app.
   onPrepareToTerminate(): boolean {
+    if (deviceInfo.deviceType !== '2in1') {
+      return false;
+    }
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'close intercepted, hiding to tray');
     if (this.trayReady) {
       this.context.hideAbility().catch((err: BusinessError) => {
@@ -95,7 +128,9 @@ export default class EntryAbility extends UIAbility {
 
   onNewWant(want: Want, launchParam: AbilityConstant.LaunchParam): void {
     // Relaunching from the dock/launcher while hidden in the tray brings the
-    // window back (showAbility is a PC/tablet API; ignore it elsewhere).
+    // window back. On tablets the tray feature is disabled entirely — calling
+    // showAbility() there fights the launcher's scene transition and loops
+    // the window scale animation.
     if (this.trayReady) {
       this.context.showAbility().catch((err: BusinessError) => {
         hilog.warn(DOMAIN, 'testTag', 'showAbility failed: %{public}s', JSON.stringify(err));
@@ -115,9 +150,14 @@ export default class EntryAbility extends UIAbility {
     }
   }
 
-  // Status-bar (tray) icon on 2-in-1 only; on phones the syscap is missing and
-  // everything below throws, leaving trayReady false and behavior unchanged.
+  // Status-bar (tray) icon: 2-in-1 only. The API technically succeeds on
+  // pads too, but hideAbility/showAbility on a tablet conflicts with the
+  // launcher's scene transition (window scale animation loop), so the whole
+  // tray path stays disabled there.
   private async setupTray(): Promise<void> {
+    if (deviceInfo.deviceType !== '2in1') {
+      return;
+    }
     let white = await this.loadTrayIcon();
     let black = await this.loadTrayIcon();
     if (white === undefined || black === undefined) {
@@ -200,7 +240,7 @@ export default class EntryAbility extends UIAbility {
         hilog.error(DOMAIN, 'testTag', 'Failed to set full screen. Cause: %{public}s', JSON.stringify(err));
       });
       syncAvoidArea(mainWindow);
-      syncWindowWidth(mainWindow);
+      this.commitWinWidthVp(this.pxToVp(mainWindow.getWindowProperties().windowRect.width));
       mainWindow.on('avoidAreaChange', (data: window.AvoidAreaOptions) => {
         if (data.type === window.AvoidAreaType.TYPE_SYSTEM) {
           AppStorage.setOrCreate('topRectHeight', data.area.topRect.height);
@@ -210,8 +250,7 @@ export default class EntryAbility extends UIAbility {
       });
       // Free-window (PC) resizing drives the adaptive layout breakpoint.
       mainWindow.on('windowSizeChange', (size: window.Size) => {
-        let density = display.getDefaultDisplaySync().densityPixels;
-        AppStorage.setOrCreate('winWidthVp', density > 0 ? size.width / density : size.width);
+        this.onWindowWidthEvent(size.width);
       });
     } catch (err) {
       hilog.error(DOMAIN, 'testTag', 'Failed to prepare immersive window. Cause: %{public}s', JSON.stringify(err));
