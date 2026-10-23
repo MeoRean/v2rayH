@@ -27,6 +27,12 @@ const F_SUBS: string = 'subs.json';
 const F_ACTIVE_GROUP: string = 'active_group.txt';
 const F_ROUTING: string = 'routing.json';
 const F_GEO: string = 'geo.json';
+const F_GEO_SUPPORT: string = 'geo_support.json';
+
+interface GeoSupportCache {
+  stamp: string;
+  cats: Record<string, boolean>;
+}
 const F_BACKUP_SNAPSHOT: string = 'backup-latest.json';
 const F_APPEARANCE: string = 'appearance.json';
 
@@ -606,6 +612,29 @@ export class AppState {
   }
 
   private refreshGeoSupport(): void {
+    // Byte-scanning the multi-megabyte geo files froze startup for a
+    // moment. Persist the scan results keyed by the files' size+mtime: if
+    // the geo files have not changed, restore from the tiny cache file and
+    // skip the scan entirely. Only updates/imports (which already wait on
+    // IO) pay for a fresh scan.
+    let stamp = this.geositeSize.toString() + ':' + this.geositeAt.toString() + ':'
+      + this.geoipSize.toString() + ':' + this.geoipAt.toString();
+    let text = this.store.readText(F_GEO_SUPPORT);
+    if (text.length > 0) {
+      try {
+        let saved = JSON.parse(text) as GeoSupportCache;
+        if (saved.stamp === stamp && saved.cats !== undefined) {
+          this.geoSupport.clear();
+          let keys: string[] = Object.keys(saved.cats);
+          for (let i = 0; i < keys.length; i++) {
+            this.geoSupport.set(keys[i], saved.cats[keys[i]] === true);
+          }
+          return;
+        }
+      } catch (e) {
+        console.error('parse geo support cache failed: ' + JSON.stringify(e));
+      }
+    }
     this.geoSupport.clear();
     let site = this.store.readBytes('geo/geosite.dat');
     let ip = this.store.readBytes('geo/geoip.dat');
@@ -619,6 +648,12 @@ export class AppState {
       this.geoSupport.set('geoip.dat:' + ipCats[i],
         ip !== undefined && this.geoBytesContain(ip, ipCats[i]));
     }
+    let cats: Record<string, boolean> = {};
+    this.geoSupport.forEach((v: boolean, k: string) => {
+      cats[k] = v;
+    });
+    let cache: GeoSupportCache = { stamp: stamp, cats: cats };
+    this.store.writeText(F_GEO_SUPPORT, JSON.stringify(cache));
   }
 
   private geoCodeSupported(fileName: string, code: string): boolean {
